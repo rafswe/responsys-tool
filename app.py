@@ -103,10 +103,12 @@ if uploaded_file and campaign_name:
                 st.success("✅ Success! File generated.")
                 
                 # Convert to CSV for download
-                csv = result_df.to_csv(index=False).encode('utf-8')
+                # NEW LINE (Fixes Swedish characters)
+                csv = result_df.to_csv(index=False).encode('utf-8-sig')
                 st.download_button(
                     label="Download CSV for Responsys",
                     data=csv,
                     file_name="upload_to_responsys.csv",
                     mime="text/csv"
+
                 )
