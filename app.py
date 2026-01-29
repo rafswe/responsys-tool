@@ -309,9 +309,16 @@ with tab2:
                         st.error("⛔ Syntax Errors Found!")
                         st.dataframe(error_df)
                     else:
-                        st.success(f"✅ Generated {len(json_list)} unique payloads.")
+                        total_payloads = len(json_list)
+                        st.success(f"✅ Generated {total_payloads} unique payloads.")
+                        st.info("👇 Copy and push these batches one by one in Postman.")
                         
                         for i, payload in enumerate(json_list):
-                            fields = ", ".join(payload['recordData']['fieldNames'][4:]) # Show just content fields
-                            st.subheader(f"Payload {i+1} (Updates: {fields})")
+                            # Get the list of fields being updated in this batch
+                            fields = ", ".join(payload['recordData']['fieldNames'][4:]) 
+                            
+                            st.markdown("---") # Divider line
+                            st.subheader(f"🚀 Payload {i+1} of {total_payloads}")
+                            st.caption(f"**Fields updating:** {fields}")
+                            
                             st.code(json.dumps(payload, indent=2), language='json')
