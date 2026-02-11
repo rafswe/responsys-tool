@@ -153,11 +153,11 @@ def generate_csv_logic(df, existing_meta, lang_cols, default_campaign, use_engli
     return csv_bytes, None
 
 # ==========================================
-# 3. CORE LOGIC: JSON GENERATOR
+# 3. CORE LOGIC: JSON GENERATOR (UPDATED FIX)
 # ==========================================
 def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
     # Configuration
-    MATCH_KEYS = ['CAMPAIGN_NAME', 'PRIORITY', 'SITE_LANGUAGE', 'SITE_BRAND']
+    # Note: We rely on the DB Primary Key, so we don't need to specify matchColumnNames
     
     # Clean RPL first (we do this in place for JSON)
     errors = []
@@ -204,6 +204,8 @@ def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
 
         # Build the record
         active_fields = ['CAMPAIGN_NAME', 'PRIORITY', 'SITE_LANGUAGE', 'SITE_BRAND']
+        
+        # IMPORTANT: Convert everything to string for Responsys API
         record_values = [str(camp), str(prio), str(lang), str(brand)]
         
         # Add dynamic fields (Content)
@@ -227,15 +229,10 @@ def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
                 "fieldNames": list(shape),
                 "records": records
             },
-            "mergeRule": {
-                "matchColumnName1": "CAMPAIGN_NAME",
-                "matchColumnName2": "PRIORITY",
-                "matchColumnName3": "SITE_LANGUAGE",
-                "matchColumnName4": "SITE_BRAND",
-                "optinValue": "I",
-                "rejectRecordIfChannelEmpty": "I",
-                "defaultPermissionStatus": "OPTIN"
-            }
+            # --- UPDATED MERGE LOGIC ---
+            # No mergeRule wrapper. No matchColumnNames (uses Table PK).
+            "insertOnNoMatch": True,
+            "updateOnMatch": "REPLACE_ALL"
         }
         json_outputs.append(payload)
         
