@@ -3,6 +3,7 @@ import pandas as pd
 import io
 import re
 import json
+import csv  # <--- Required for fixing the Excel comma issue
 
 # ==========================================
 # 1. HELPER FUNCTIONS (Shared by both modes)
@@ -112,8 +113,7 @@ def generate_csv_logic(df, existing_meta, lang_cols, default_campaign, use_engli
     # 2. Melt
     melted = df.melt(id_vars=existing_meta, value_vars=lang_cols, var_name='SITE_LANGUAGE', value_name='Content')
     
-    # 3. Drop Empty Rows (Crucial for partial updates if fallback is OFF)
-    # If content is empty, we remove the row so it doesn't overwrite DB with ""
+    # 3. Drop Empty Rows
     melted = melted.dropna(subset=['Content'])
     melted = melted[melted['Content'] != ""]
 
@@ -132,6 +132,7 @@ def generate_csv_logic(df, existing_meta, lang_cols, default_campaign, use_engli
     pivot_index = ['SITE_LANGUAGE', 'Priority', 'Module_Type']
     if 'SITE_BRAND' in df.columns: pivot_index.append('SITE_BRAND')
     if 'CAMPAIGN_NAME' in df.columns: pivot_index.append('CAMPAIGN_NAME')
+    # Only add SITE_COUNTRY to pivot if it actually exists in the input
     if 'SITE_COUNTRY' in df.columns: pivot_index.append('SITE_COUNTRY')
 
     final_df = melted.pivot_table(
@@ -144,20 +145,25 @@ def generate_csv_logic(df, existing_meta, lang_cols, default_campaign, use_engli
     # 6. Defaults
     if 'CAMPAIGN_NAME' not in final_df.columns: final_df['CAMPAIGN_NAME'] = default_campaign
     if 'SITE_BRAND' not in final_df.columns: final_df['SITE_BRAND'] = 'ALL'
-    if 'SITE_COUNTRY' not in final_df.columns: final_df['SITE_COUNTRY'] = 'ALL'
+    
+    # REMOVED: Forced creation of SITE_COUNTRY = 'ALL'
         
     final_df.rename(columns={'Priority': 'PRIORITY', 'Module_Type': 'MODULE'}, inplace=True)
     
     # 7. Export Bytes
-    csv_bytes = final_df.to_csv(index=False, sep=',').encode('utf-8-sig')
+    # csv.QUOTE_ALL wraps every cell in "quotes", so Excel knows "Hello, World" is one cell.
+    buffer = io.StringIO()
+    final_df.to_csv(buffer, index=False, sep=',', quoting=csv.QUOTE_ALL)
+    csv_bytes = buffer.getvalue().encode('utf-8-sig')
+    
     return csv_bytes, None
 
 # ==========================================
-# 3. CORE LOGIC: JSON GENERATOR (UPDATED FIX)
+# 3. CORE LOGIC: JSON GENERATOR
 # ==========================================
 def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
     # Configuration
-    # Note: We rely on the DB Primary Key, so we don't need to specify matchColumnNames
+    # We rely on the DB Primary Key, so we don't need to specify matchColumnNames
     
     # Clean RPL first (we do this in place for JSON)
     errors = []
@@ -206,6 +212,7 @@ def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
         active_fields = ['CAMPAIGN_NAME', 'PRIORITY', 'SITE_LANGUAGE', 'SITE_BRAND']
         
         # IMPORTANT: Convert everything to string for Responsys API
+        # This fixes the "Value cannot be empty" error for Priority=25
         record_values = [str(camp), str(prio), str(lang), str(brand)]
         
         # Add dynamic fields (Content)
@@ -229,8 +236,8 @@ def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
                 "fieldNames": list(shape),
                 "records": records
             },
-            # --- UPDATED MERGE LOGIC ---
-            # No mergeRule wrapper. No matchColumnNames (uses Table PK).
+            # --- FINAL MERGE LOGIC FOR SUPPLEMENTAL TABLES ---
+            # No mergeRule object. No matchColumnNames.
             "insertOnNoMatch": True,
             "updateOnMatch": "REPLACE_ALL"
         }
