@@ -14,7 +14,6 @@ def clean_headers(df):
     df.columns = df.columns.str.strip()
     
     required_map = {
-        # FIXED: Removed 'id' so it doesn't conflict with Indonesian (ID) language code
         'Priority': ['priority', 'prio'], 
         'Description': ['desc', 'description', 'context'],
         'Module_Type': ['module', 'module_type', 'modul'],
@@ -40,6 +39,10 @@ def validate_and_clean_rpl(text):
     if pd.isna(text) or text == "":
         return "", None
     text = str(text).strip()
+    
+    # Catch intentional empty fields
+    if text.upper() == '[EMPTY]':
+        return "[EMPTY]", None
     
     # Typography
     replacements = {'“': '"', '”': '"', '’': "'", '‘': "'", '…': '...', '–': '-', '—': '-'}
@@ -151,6 +154,9 @@ def generate_csv_logic(df, existing_meta, lang_cols, default_campaign, use_engli
         
     final_df.rename(columns={'Priority': 'PRIORITY', 'Module_Type': 'MODULE'}, inplace=True)
     
+    # Convert [EMPTY] markers to actual empty strings before export
+    final_df = final_df.replace('[EMPTY]', '')
+    
     # 7. Export Bytes
     buffer = io.StringIO()
     final_df.to_csv(buffer, index=False, sep=',', quoting=csv.QUOTE_ALL)
@@ -189,13 +195,11 @@ def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
     unique_keys = melted[['CAMPAIGN_NAME', 'Priority', 'SITE_LANGUAGE', 'SITE_BRAND']].drop_duplicates()
     
     for _, key_row in unique_keys.iterrows():
-        # Get all content for this specific key combination
         camp = key_row['CAMPAIGN_NAME']
         prio = key_row['Priority']
         lang = key_row['SITE_LANGUAGE']
         brand = key_row['SITE_BRAND']
         
-        # Filter the melted data for this specific item
         subset = melted[
             (melted['CAMPAIGN_NAME'] == camp) & 
             (melted['Priority'] == prio) & 
@@ -204,20 +208,21 @@ def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
         
         if subset.empty: continue
 
-        # Build the record
         active_fields = ['CAMPAIGN_NAME', 'PRIORITY', 'SITE_LANGUAGE', 'SITE_BRAND']
-        
-        # Convert everything to string for Responsys API
         record_values = [str(camp), str(prio), str(lang), str(brand)]
         
         # Add dynamic fields (Content)
         for _, row in subset.iterrows():
             field = row['DB_Field_Name']
             content = row['Content']
+            
+            # Convert [EMPTY] marker to actual empty string
+            if content == '[EMPTY]':
+                content = ""
+                
             active_fields.append(field)
             record_values.append(str(content))
             
-        # Create Signature
         shape_signature = tuple(active_fields)
         if shape_signature not in grouped_payloads:
             grouped_payloads[shape_signature] = []
@@ -282,6 +287,8 @@ with tab1:
                             file_name="upload_to_responsys.csv",
                             mime="text/csv"
                         )
+    else:
+        st.warning("👈 Please upload an Excel or CSV file in the sidebar to get started.")
 
 # --- TAB 2: JSON MODE ---
 with tab2:
@@ -313,3 +320,5 @@ with tab2:
                             st.caption(f"**Fields updating:** {fields}")
                             
                             st.code(json.dumps(payload, indent=2), language='json')
+    else:
+        st.warning("👈 Please upload an Excel or CSV file in the sidebar to get started.")
