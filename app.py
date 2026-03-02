@@ -263,3 +263,53 @@ with tab1:
                                help="If checked, empty cells will use English text. Uncheck this for partial updates!")
 
     if uploaded_file:
+        if st.button("Generate CSV", key="btn_csv"):
+            with st.spinner("Processing CSV..."):
+                df, meta, langs, err = load_and_prep_data(uploaded_file)
+                if err:
+                    st.error(err)
+                else:
+                    csv_data, error_df = generate_csv_logic(df, meta, langs, default_campaign, use_fallback)
+                    
+                    if error_df is not None:
+                        st.error("⛔ Syntax Errors Found!")
+                        st.dataframe(error_df)
+                    else:
+                        st.success(f"✅ CSV Ready! ({len(df)} base rows processed)")
+                        st.download_button(
+                            "Download upload_to_responsys.csv",
+                            data=csv_data,
+                            file_name="upload_to_responsys.csv",
+                            mime="text/csv"
+                        )
+
+# --- TAB 2: JSON MODE ---
+with tab2:
+    st.header("Generate JSON for API")
+    st.write("Best for **Partial Updates** (fixing typos without overwriting other fields).")
+    
+    if uploaded_file:
+        if st.button("Generate JSONs", key="btn_json"):
+            with st.spinner("Calculating payloads..."):
+                df, meta, langs, err = load_and_prep_data(uploaded_file)
+                if err:
+                    st.error(err)
+                else:
+                    json_list, error_df = generate_json_logic(df, meta, langs, default_campaign)
+                    
+                    if error_df is not None:
+                        st.error("⛔ Syntax Errors Found!")
+                        st.dataframe(error_df)
+                    else:
+                        total_payloads = len(json_list)
+                        st.success(f"✅ Generated {total_payloads} unique payloads.")
+                        st.info("👇 Copy and push these batches one by one in Postman.")
+                        
+                        for i, payload in enumerate(json_list):
+                            fields = ", ".join(payload['recordData']['fieldNames'][4:]) 
+                            
+                            st.markdown("---")
+                            st.subheader(f"🚀 Payload {i+1} of {total_payloads}")
+                            st.caption(f"**Fields updating:** {fields}")
+                            
+                            st.code(json.dumps(payload, indent=2), language='json')
