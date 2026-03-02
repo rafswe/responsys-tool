@@ -3,7 +3,7 @@ import pandas as pd
 import io
 import re
 import json
-import csv  # <--- Required for fixing the Excel comma issue
+import csv  # Required for fixing the Excel comma issue
 
 # ==========================================
 # 1. HELPER FUNCTIONS (Shared by both modes)
@@ -14,7 +14,8 @@ def clean_headers(df):
     df.columns = df.columns.str.strip()
     
     required_map = {
-        'Priority': ['priority', 'id', 'prio'],
+        # FIXED: Removed 'id' so it doesn't conflict with Indonesian (ID) language code
+        'Priority': ['priority', 'prio'], 
         'Description': ['desc', 'description', 'context'],
         'Module_Type': ['module', 'module_type', 'modul'],
         'DB_Field_Name': ['field', 'db_field_name', 'db_field'],
@@ -82,6 +83,9 @@ def load_and_prep_data(uploaded_file):
         # B. Clean Headers
         df = clean_headers(df)
         
+        # Safety net: Remove any true accidental duplicate columns
+        df = df.loc[:, ~df.columns.duplicated()]
+        
         # C. Identify Metadata
         possible_meta = ['Priority', 'Module_Type', 'DB_Field_Name', 'Description', 'SITE_BRAND', 'CAMPAIGN_NAME', 'SITE_COUNTRY']
         existing_meta = [c for c in possible_meta if c in df.columns]
@@ -132,7 +136,6 @@ def generate_csv_logic(df, existing_meta, lang_cols, default_campaign, use_engli
     pivot_index = ['SITE_LANGUAGE', 'Priority', 'Module_Type']
     if 'SITE_BRAND' in df.columns: pivot_index.append('SITE_BRAND')
     if 'CAMPAIGN_NAME' in df.columns: pivot_index.append('CAMPAIGN_NAME')
-    # Only add SITE_COUNTRY to pivot if it actually exists in the input
     if 'SITE_COUNTRY' in df.columns: pivot_index.append('SITE_COUNTRY')
 
     final_df = melted.pivot_table(
@@ -145,13 +148,10 @@ def generate_csv_logic(df, existing_meta, lang_cols, default_campaign, use_engli
     # 6. Defaults
     if 'CAMPAIGN_NAME' not in final_df.columns: final_df['CAMPAIGN_NAME'] = default_campaign
     if 'SITE_BRAND' not in final_df.columns: final_df['SITE_BRAND'] = 'ALL'
-    
-    # REMOVED: Forced creation of SITE_COUNTRY = 'ALL'
         
     final_df.rename(columns={'Priority': 'PRIORITY', 'Module_Type': 'MODULE'}, inplace=True)
     
     # 7. Export Bytes
-    # csv.QUOTE_ALL wraps every cell in "quotes", so Excel knows "Hello, World" is one cell.
     buffer = io.StringIO()
     final_df.to_csv(buffer, index=False, sep=',', quoting=csv.QUOTE_ALL)
     csv_bytes = buffer.getvalue().encode('utf-8-sig')
@@ -162,9 +162,6 @@ def generate_csv_logic(df, existing_meta, lang_cols, default_campaign, use_engli
 # 3. CORE LOGIC: JSON GENERATOR
 # ==========================================
 def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
-    # Configuration
-    # We rely on the DB Primary Key, so we don't need to specify matchColumnNames
-    
     # Clean RPL first (we do this in place for JSON)
     errors = []
     for col in lang_cols:
@@ -188,7 +185,6 @@ def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
     # Grouping Logic
     grouped_payloads = {} 
 
-    # We need to pivot back PER ROW (Campaign+Priority+Lang) to see the "Shape"
     # Identify unique keys
     unique_keys = melted[['CAMPAIGN_NAME', 'Priority', 'SITE_LANGUAGE', 'SITE_BRAND']].drop_duplicates()
     
@@ -211,8 +207,7 @@ def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
         # Build the record
         active_fields = ['CAMPAIGN_NAME', 'PRIORITY', 'SITE_LANGUAGE', 'SITE_BRAND']
         
-        # IMPORTANT: Convert everything to string for Responsys API
-        # This fixes the "Value cannot be empty" error for Priority=25
+        # Convert everything to string for Responsys API
         record_values = [str(camp), str(prio), str(lang), str(brand)]
         
         # Add dynamic fields (Content)
@@ -236,8 +231,6 @@ def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
                 "fieldNames": list(shape),
                 "records": records
             },
-            # --- FINAL MERGE LOGIC FOR SUPPLEMENTAL TABLES ---
-            # No mergeRule object. No matchColumnNames.
             "insertOnNoMatch": True,
             "updateOnMatch": "REPLACE_ALL"
         }
@@ -266,63 +259,7 @@ with tab1:
     st.header("Generate CSV for Connect Job")
     st.write("Best for **New Campaigns** or massive updates.")
     
-    # Checkbox for fallback logic
     use_fallback = st.checkbox("New Campaign Mode: Fill empty translations with English?", value=True, 
-                               help="If checked, empty Swedish/Norwegian cells will use English text. Uncheck this for partial updates!")
+                               help="If checked, empty cells will use English text. Uncheck this for partial updates!")
 
     if uploaded_file:
-        if st.button("Generate CSV", key="btn_csv"):
-            with st.spinner("Processing CSV..."):
-                # Load
-                df, meta, langs, err = load_and_prep_data(uploaded_file)
-                if err:
-                    st.error(err)
-                else:
-                    # Logic
-                    csv_data, error_df = generate_csv_logic(df, meta, langs, default_campaign, use_fallback)
-                    
-                    if error_df is not None:
-                        st.error("⛔ Syntax Errors Found!")
-                        st.dataframe(error_df)
-                    else:
-                        st.success(f"✅ CSV Ready! ({len(df)} base rows processed)")
-                        st.download_button(
-                            "Download upload_to_responsys.csv",
-                            data=csv_data,
-                            file_name="upload_to_responsys.csv",
-                            mime="text/csv"
-                        )
-
-# --- TAB 2: JSON MODE ---
-with tab2:
-    st.header("Generate JSON for API")
-    st.write("Best for **Partial Updates** (fixing typos without overwriting other fields).")
-    
-    if uploaded_file:
-        if st.button("Generate JSONs", key="btn_json"):
-            with st.spinner("Calculating payloads..."):
-                # Load
-                df, meta, langs, err = load_and_prep_data(uploaded_file)
-                if err:
-                    st.error(err)
-                else:
-                    # Logic
-                    json_list, error_df = generate_json_logic(df, meta, langs, default_campaign)
-                    
-                    if error_df is not None:
-                        st.error("⛔ Syntax Errors Found!")
-                        st.dataframe(error_df)
-                    else:
-                        total_payloads = len(json_list)
-                        st.success(f"✅ Generated {total_payloads} unique payloads.")
-                        st.info("👇 Copy and push these batches one by one in Postman.")
-                        
-                        for i, payload in enumerate(json_list):
-                            # Get the list of fields being updated in this batch
-                            fields = ", ".join(payload['recordData']['fieldNames'][4:]) 
-                            
-                            st.markdown("---") # Divider line
-                            st.subheader(f"🚀 Payload {i+1} of {total_payloads}")
-                            st.caption(f"**Fields updating:** {fields}")
-                            
-                            st.code(json.dumps(payload, indent=2), language='json')
