@@ -191,25 +191,29 @@ def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
     # Grouping Logic
     grouped_payloads = {} 
 
-    # Identify unique keys
-    unique_keys = melted[['CAMPAIGN_NAME', 'Priority', 'SITE_LANGUAGE', 'SITE_BRAND']].drop_duplicates()
+    # --- FIX: Included 'Module_Type' in the unique keys ---
+    unique_keys = melted[['CAMPAIGN_NAME', 'Priority', 'Module_Type', 'SITE_LANGUAGE', 'SITE_BRAND']].drop_duplicates()
     
     for _, key_row in unique_keys.iterrows():
         camp = key_row['CAMPAIGN_NAME']
         prio = key_row['Priority']
+        mod  = key_row['Module_Type']  # <--- NEW
         lang = key_row['SITE_LANGUAGE']
         brand = key_row['SITE_BRAND']
         
+        # --- FIX: Match by Module_Type as well ---
         subset = melted[
             (melted['CAMPAIGN_NAME'] == camp) & 
             (melted['Priority'] == prio) & 
+            (melted['Module_Type'] == mod) &
             (melted['SITE_LANGUAGE'] == lang)
         ]
         
         if subset.empty: continue
 
-        active_fields = ['CAMPAIGN_NAME', 'PRIORITY', 'SITE_LANGUAGE', 'SITE_BRAND']
-        record_values = [str(camp), str(prio), str(lang), str(brand)]
+        # --- FIX: Added 'MODULE' to the fields and 'mod' to the values ---
+        active_fields = ['CAMPAIGN_NAME', 'PRIORITY', 'MODULE', 'SITE_LANGUAGE', 'SITE_BRAND']
+        record_values = [str(camp), str(prio), str(mod), str(lang), str(brand)]
         
         # Add dynamic fields (Content)
         for _, row in subset.iterrows():
