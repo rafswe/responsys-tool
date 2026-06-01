@@ -3,15 +3,19 @@ import pandas as pd
 import io
 import re
 import json
-import csv  # Required for fixing the Excel comma issue
+import csv 
 
 # ==========================================
 # 1. HELPER FUNCTIONS (Shared by both modes)
 # ==========================================
 
 def clean_headers(df):
-    """ Normalizes headers to standard names, removing spaces/typos. """
-    df.columns = df.columns.str.strip()
+    """ Normalizes headers, removing spaces, typos, and ghost columns. """
+    # FIX 1: Force all headers to string to prevent "float is not iterable" crash
+    df.columns = df.columns.astype(str).str.strip()
+    
+    # Drop purely empty/nan ghost columns
+    df = df.loc[:, (df.columns != 'nan') & (df.columns != '')]
     
     required_map = {
         'Priority': ['priority', 'prio'], 
@@ -36,20 +40,17 @@ def clean_headers(df):
 
 def validate_and_clean_rpl(text):
     """ Checks for RPL syntax errors and smart quotes. """
-    if pd.isna(text) or text == "":
+    if pd.isna(text) or str(text).strip() == "":
         return "", None
     text = str(text).strip()
     
-    # Catch intentional empty fields
     if text.upper() == '[EMPTY]':
         return "[EMPTY]", None
     
-    # Typography
     replacements = {'“': '"', '”': '"', '’': "'", '‘': "'", '…': '...', '–': '-', '—': '-'}
     for bad, good in replacements.items():
         text = text.replace(bad, good)
         
-    # Validation
     open_tags = text.count('${')
     close_tags = text.count('}')
     if open_tags != close_tags:
@@ -60,40 +61,44 @@ def validate_and_clean_rpl(text):
     return text, None
 
 def load_and_prep_data(uploaded_file):
-    """ Smart loads Excel/CSV and identifies columns. Returns df, meta_cols, lang_cols, error. """
+    """ Smart loads Excel/CSV and identifies columns. """
     try:
         # A. Smart Load (Find Header Row)
         if uploaded_file.name.endswith('.xlsx') or uploaded_file.name.endswith('.xls'):
             xl_file = pd.ExcelFile(uploaded_file)
-            preview = xl_file.parse(header=None, nrows=10)
+            preview = xl_file.parse(header=None, nrows=15)
             header_row_idx = 0
             for idx, row in preview.iterrows():
-                row_str = row.astype(str).str.lower().tolist()
+                row_str = [str(x).lower() for x in row.tolist()]
                 if any('priority' in s for s in row_str) or any('db_field_name' in s for s in row_str):
                     header_row_idx = idx
                     break
             df = xl_file.parse(header=header_row_idx)
         else:
+            # FIX 3: Smart loading for messy CSVs with metadata at the top
             try:
-                df = pd.read_csv(uploaded_file)
-                if len(df.columns) <= 1:
-                    uploaded_file.seek(0)
-                    df = pd.read_csv(uploaded_file, sep=';')
+                preview = pd.read_csv(uploaded_file, nrows=15, sep=None, engine='python', header=None)
+                header_row_idx = 0
+                for idx, row in preview.iterrows():
+                    row_str = [str(x).lower() for x in row.tolist()]
+                    if any('priority' in s for s in row_str) or any('db_field_name' in s for s in row_str):
+                        header_row_idx = idx
+                        break
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, header=header_row_idx, sep=None, engine='python')
             except:
                 uploaded_file.seek(0)
                 df = pd.read_csv(uploaded_file, sep=None, engine='python')
 
         # B. Clean Headers
         df = clean_headers(df)
-        
-        # Safety net: Remove any true accidental duplicate columns
         df = df.loc[:, ~df.columns.duplicated()]
         
         # C. Identify Metadata
         possible_meta = ['Priority', 'Module_Type', 'DB_Field_Name', 'Description', 'SITE_BRAND', 'CAMPAIGN_NAME', 'SITE_COUNTRY']
         existing_meta = [c for c in possible_meta if c in df.columns]
         
-        critical_cols = ['Priority', 'Module_Type', 'DB_Field_Name']
+        critical_cols = ['Priority', 'Module_Type']
         missing = [c for c in critical_cols if c not in df.columns]
         if missing:
             return None, None, None, f"Error: Missing columns {missing}"
@@ -111,20 +116,21 @@ def load_and_prep_data(uploaded_file):
 # 2. CORE LOGIC: CSV GENERATOR
 # ==========================================
 def generate_csv_logic(df, existing_meta, lang_cols, default_campaign, use_english_fallback):
-    # 1. Fallback Logic (Optional)
     if use_english_fallback and 'EN' in df.columns:
         for lang in lang_cols:
             if lang != 'EN':
                 df[lang] = df[lang].fillna(df['EN'])
 
-    # 2. Melt
     melted = df.melt(id_vars=existing_meta, value_vars=lang_cols, var_name='SITE_LANGUAGE', value_name='Content')
     
-    # 3. Drop Empty Rows
-    melted = melted.dropna(subset=['Content'])
-    melted = melted[melted['Content'] != ""]
+    # FIX 2: Smart Drop Logic for Structural Modules
+    melted['Content'] = melted['Content'].fillna("")
+    if 'DB_Field_Name' not in melted.columns: melted['DB_Field_Name'] = ""
+    melted['DB_Field_Name'] = melted['DB_Field_Name'].fillna("")
+    
+    # Keep rows with text, OR rows that are structural (no DB field defined)
+    melted = melted[(melted['Content'] != "") | (melted['DB_Field_Name'] == "")]
 
-    # 4. Clean & Validate
     errors = []
     for index, row in melted.iterrows():
         cleaned, error_msg = validate_and_clean_rpl(row['Content'])
@@ -135,7 +141,6 @@ def generate_csv_logic(df, existing_meta, lang_cols, default_campaign, use_engli
     if errors:
         return None, pd.DataFrame(errors)
 
-    # 5. Pivot
     pivot_index = ['SITE_LANGUAGE', 'Priority', 'Module_Type']
     if 'SITE_BRAND' in df.columns: pivot_index.append('SITE_BRAND')
     if 'CAMPAIGN_NAME' in df.columns: pivot_index.append('CAMPAIGN_NAME')
@@ -148,16 +153,17 @@ def generate_csv_logic(df, existing_meta, lang_cols, default_campaign, use_engli
         aggfunc='first'
     ).reset_index()
 
-    # 6. Defaults
+    # Clean up empty column generated by structural modules
+    if "" in final_df.columns:
+        final_df = final_df.drop(columns=[""])
+
     if 'CAMPAIGN_NAME' not in final_df.columns: final_df['CAMPAIGN_NAME'] = default_campaign
     if 'SITE_BRAND' not in final_df.columns: final_df['SITE_BRAND'] = 'ALL'
         
     final_df.rename(columns={'Priority': 'PRIORITY', 'Module_Type': 'MODULE'}, inplace=True)
-    
-    # Convert [EMPTY] markers to actual empty strings before export
     final_df = final_df.replace('[EMPTY]', '')
+    final_df.fillna("", inplace=True)
     
-    # 7. Export Bytes
     buffer = io.StringIO()
     final_df.to_csv(buffer, index=False, sep=',', quoting=csv.QUOTE_ALL)
     csv_bytes = buffer.getvalue().encode('utf-8-sig')
@@ -168,7 +174,6 @@ def generate_csv_logic(df, existing_meta, lang_cols, default_campaign, use_engli
 # 3. CORE LOGIC: JSON GENERATOR
 # ==========================================
 def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
-    # Clean RPL first (we do this in place for JSON)
     errors = []
     for col in lang_cols:
         for idx, val in df[col].items():
@@ -179,29 +184,29 @@ def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
     if errors:
         return None, pd.DataFrame(errors)
 
-    # Melt to get a long list of all content
     melted = df.melt(id_vars=existing_meta, value_vars=lang_cols, var_name='SITE_LANGUAGE', value_name='Content')
-    melted = melted.dropna(subset=['Content']) # Drop empty
-    melted = melted[melted['Content'] != ""]
+    
+    # FIX 2: Smart Drop Logic for Structural Modules
+    melted['Content'] = melted['Content'].fillna("")
+    if 'DB_Field_Name' not in melted.columns: melted['DB_Field_Name'] = ""
+    melted['DB_Field_Name'] = melted['DB_Field_Name'].fillna("")
+    
+    # Keep rows with text, OR rows that are structural (no DB field defined)
+    melted = melted[(melted['Content'] != "") | (melted['DB_Field_Name'] == "")]
 
-    # Add defaults if missing in original
     if 'CAMPAIGN_NAME' not in melted.columns: melted['CAMPAIGN_NAME'] = default_campaign
     if 'SITE_BRAND' not in melted.columns: melted['SITE_BRAND'] = 'ALL'
     
-    # Grouping Logic
     grouped_payloads = {} 
-
-    # --- FIX: Included 'Module_Type' in the unique keys ---
     unique_keys = melted[['CAMPAIGN_NAME', 'Priority', 'Module_Type', 'SITE_LANGUAGE', 'SITE_BRAND']].drop_duplicates()
     
     for _, key_row in unique_keys.iterrows():
         camp = key_row['CAMPAIGN_NAME']
         prio = key_row['Priority']
-        mod  = key_row['Module_Type']  # <--- NEW
+        mod  = key_row['Module_Type']  
         lang = key_row['SITE_LANGUAGE']
         brand = key_row['SITE_BRAND']
         
-        # --- FIX: Match by Module_Type as well ---
         subset = melted[
             (melted['CAMPAIGN_NAME'] == camp) & 
             (melted['Priority'] == prio) & 
@@ -211,16 +216,17 @@ def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
         
         if subset.empty: continue
 
-        # --- FIX: Added 'MODULE' to the fields and 'mod' to the values ---
         active_fields = ['CAMPAIGN_NAME', 'PRIORITY', 'MODULE', 'SITE_LANGUAGE', 'SITE_BRAND']
         record_values = [str(camp), str(prio), str(mod), str(lang), str(brand)]
         
-        # Add dynamic fields (Content)
         for _, row in subset.iterrows():
-            field = row['DB_Field_Name']
+            field = str(row['DB_Field_Name']).strip()
             content = row['Content']
             
-            # Convert [EMPTY] marker to actual empty string
+            # Skip mapping if it's a structural module with no field
+            if field == "":
+                continue
+                
             if content == '[EMPTY]':
                 content = ""
                 
@@ -232,7 +238,6 @@ def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
             grouped_payloads[shape_signature] = []
         grouped_payloads[shape_signature].append(record_values)
 
-    # Construct Final JSON Objects
     json_outputs = []
     for shape, records in grouped_payloads.items():
         payload = {
@@ -253,23 +258,18 @@ def generate_json_logic(df, existing_meta, lang_cols, default_campaign):
 st.set_page_config(page_title="Responsys Tools", page_icon="✉️")
 st.title("✉️ Responsys Content Tools")
 
-# Tab Selection
 tab1, tab2 = st.tabs(["📂 1. Create CSV (Connect Job)", "🚀 2. Create JSON (Postman API)"])
 
-# Shared Inputs (Sidebar)
 with st.sidebar:
     st.header("Input Data")
     uploaded_file = st.file_uploader("Upload Excel / CSV", type=['xlsx', 'xls', 'csv'])
     default_campaign = st.text_input("Default Campaign Name", "NF_Campaign_Name")
-    st.info("Ensure your file has: Priority, Module_Type, DB_Field_Name")
+    st.info("Ensure your file has: Priority, Module_Type, DB_Field_Name (Leave DB_Field_Name blank for structural modules like dividers)")
 
-# --- TAB 1: CSV MODE ---
 with tab1:
     st.header("Generate CSV for Connect Job")
     st.write("Best for **New Campaigns** or massive updates.")
-    
-    use_fallback = st.checkbox("New Campaign Mode: Fill empty translations with English?", value=True, 
-                               help="If checked, empty cells will use English text. Uncheck this for partial updates!")
+    use_fallback = st.checkbox("New Campaign Mode: Fill empty translations with English?", value=True)
 
     if uploaded_file:
         if st.button("Generate CSV", key="btn_csv"):
@@ -279,26 +279,18 @@ with tab1:
                     st.error(err)
                 else:
                     csv_data, error_df = generate_csv_logic(df, meta, langs, default_campaign, use_fallback)
-                    
                     if error_df is not None:
                         st.error("⛔ Syntax Errors Found!")
                         st.dataframe(error_df)
                     else:
-                        st.success(f"✅ CSV Ready! ({len(df)} base rows processed)")
-                        st.download_button(
-                            "Download upload_to_responsys.csv",
-                            data=csv_data,
-                            file_name="upload_to_responsys.csv",
-                            mime="text/csv"
-                        )
+                        st.success("✅ CSV Ready!")
+                        st.download_button("Download upload_to_responsys.csv", data=csv_data, file_name="upload_to_responsys.csv", mime="text/csv")
     else:
         st.warning("👈 Please upload an Excel or CSV file in the sidebar to get started.")
 
-# --- TAB 2: JSON MODE ---
 with tab2:
     st.header("Generate JSON for API")
     st.write("Best for **Partial Updates** (fixing typos without overwriting other fields).")
-    
     if uploaded_file:
         if st.button("Generate JSONs", key="btn_json"):
             with st.spinner("Calculating payloads..."):
@@ -307,22 +299,17 @@ with tab2:
                     st.error(err)
                 else:
                     json_list, error_df = generate_json_logic(df, meta, langs, default_campaign)
-                    
                     if error_df is not None:
                         st.error("⛔ Syntax Errors Found!")
                         st.dataframe(error_df)
                     else:
                         total_payloads = len(json_list)
                         st.success(f"✅ Generated {total_payloads} unique payloads.")
-                        st.info("👇 Copy and push these batches one by one in Postman.")
-                        
                         for i, payload in enumerate(json_list):
                             fields = ", ".join(payload['recordData']['fieldNames'][4:]) 
-                            
                             st.markdown("---")
                             st.subheader(f"🚀 Payload {i+1} of {total_payloads}")
-                            st.caption(f"**Fields updating:** {fields}")
-                            
+                            st.caption(f"**Fields updating:** {fields if fields else 'STRUCTURAL MODULE ONLY (No Content)'}")
                             st.code(json.dumps(payload, indent=2), language='json')
     else:
         st.warning("👈 Please upload an Excel or CSV file in the sidebar to get started.")
