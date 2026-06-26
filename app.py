@@ -103,7 +103,24 @@ def load_and_prep_data(uploaded_file):
         if missing:
             return None, None, None, f"Error: Missing columns {missing}"
 
-        # D. Identify Languages
+        # D. FIX 4: Normalize Priority to a clean integer dtype.
+        # Excel/pandas silently upgrades a column to float64 if even one cell
+        # is blank, which turns "30" into "30.0" everywhere downstream
+        # (CSV output AND JSON payloads). Using pandas' nullable Int64 dtype
+        # fixes this once, at the source, instead of patching every str(prio)
+        # call later.
+        if 'Priority' in df.columns:
+            original_priority = df['Priority'].copy()
+            df['Priority'] = pd.to_numeric(df['Priority'], errors='coerce').astype('Int64')
+
+            # Catch real typos (e.g. "3O" instead of "30") instead of silently
+            # turning them into a missing value.
+            bad_mask = df['Priority'].isna() & original_priority.notna() & (original_priority.astype(str).str.strip() != "")
+            if bad_mask.any():
+                bad_values = sorted(set(original_priority[bad_mask].astype(str)))
+                return None, None, None, f"Error: Non-numeric Priority value(s) found: {bad_values}"
+
+        # E. Identify Languages
         lang_cols = [c for c in df.columns if c not in existing_meta]
         lang_cols = [c for c in lang_cols if "unnamed" not in str(c).lower()]
         
